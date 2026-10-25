@@ -1,3 +1,4 @@
+use axum::{routing::get, Router};
 use rusqlite::{Connection, Result};
 
 fn init_db() -> Result<Connection> {
@@ -18,7 +19,13 @@ fn init_db() -> Result<Connection> {
     Ok(conn)        //returns the success state
 }
 
-fn main() {
+// 2. A simple test handler function for our web server
+async fn health_check() -> &'static str {
+    "🤖 VRAM Saver Proxy is online and listening!"
+}
+
+#[tokio::main]
+async fn main() {
     println!("📦 Initializing local database...");
 
     match init_db() {
@@ -26,4 +33,17 @@ fn main() {
         Ok(_conn) => println!("✅ Database initialized and table created successfully!"),
         Err(e) => eprintln!("❌ Failed to initialize database: {}", e),
     }
+    
+    // 3. Build our Axum router and define routes
+    let app = Router::new().route("/", get(health_check));
+    
+    // 4. Bind our server to localhost on port 3000
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .unwrap();
+    
+    println!("🌐 Proxy server running at http://127.0.0.1:3000");
+
+    // 5. Run the server
+    axum::serve(listener, app).await.unwrap();
 }
