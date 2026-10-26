@@ -18,4 +18,11 @@ pub fn init_db() -> Result<Connection> {
     Ok(conn)        //returns the success state
 }
 
-
+/// Helper function to insert a chat message into the database
+pub fn insert_message(conn: &Connection, role: &str, content: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO messages (role, content) VALUES (?1, ?2)",
+        [role, content],
+    )?;
+    Ok(())
+}

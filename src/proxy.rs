@@ -9,6 +9,20 @@ use axum::{
     extract::Request,
     response::{IntoResponse, Response},
 };
+use serde::Deserialize;
+
+// Structure to match incoming AI chat payloads (Ollama / OpenAI format)
+#[derive(Deserialize, Debug)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChatRequest {
+    messages: Vec<ChatMessage>,
+}
+
 
 /// Main handler for all proxied traffic. It reads the incoming request,
 /// replicates its method, headers, and body, and sends it to Ollama.
@@ -27,6 +41,17 @@ pub async fn proxy_handler(req: Request) -> impl IntoResponse {
         Ok(bytes) => bytes,
         Err(_) => return Response::builder().status(500).body(Body::from("Failed to read request body")).unwrap(),
     };
+    
+    // 🔍 NEW: Try to parse the request body as a chat completion JSON and log it!
+    // We do this inside a block so any parsing errors don't crash the proxy pass-through.
+    if let Ok(chat_req) = serde_json::from_slice::<ChatRequest>(&body_bytes) {
+        if let Ok(conn) = crate::db::init_db() {
+            for msg in chat_req.messages {
+                println!("💾 Logging message to DB [{}]: {}", msg.role, msg.content);
+                let _ = crate::db::insert_message(&conn, &msg.role, &msg.content);
+            }
+        }
+    }
 
     // Build the outgoing request to Ollama
     let mut forward_req = client.request(method, &backend_url);
