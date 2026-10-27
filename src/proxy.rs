@@ -23,6 +23,12 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
 }
 
+// 🔍 NEW: Struct to capture the assistant's response from Ollama
+#[derive(Deserialize, Debug)]
+struct ChatResponse {
+    message: ChatMessage,
+}
+
 
 /// Main handler for all proxied traffic. It reads the incoming request,
 /// replicates its method, headers, and body, and sends it to Ollama.
@@ -70,6 +76,14 @@ pub async fn proxy_handler(req: Request) -> impl IntoResponse {
                 Ok(bytes) => bytes,
                 Err(_) => return Response::builder().status(500).body(Body::from("Failed to read backend response")).unwrap(),
             };
+
+            // 🔍 NEW: 2. Log incoming ASSISTANT response to DB!
+            if let Ok(chat_resp) = serde_json::from_slice::<ChatResponse>(&resp_bytes) {
+                if let Ok(conn) = crate::db::init_db() {
+                    println!("💾 Logging model response to DB: {}", chat_resp.message.content);
+                    let _ = crate::db::insert_message(&conn, &chat_resp.message.role, &chat_resp.message.content);
+                }
+            }
 
             // Reconstruct the response to send back to the user's tool
             let mut response_builder = Response::builder().status(status);
