@@ -1,7 +1,8 @@
 // ============================================================================
 // MODULE: Transparent Proxy Pipe (proxy.rs)
-// Intercepts incoming HTTP requests, forwards them to the local LLM backend
-// (Ollama), and pipes the response back to the client.
+// Intercepts incoming HTTP requests, logs conversation history to SQLite,
+// applies prompt truncation/token budgeting, forwards requests to Ollama,
+// and captures assistant responses.
 // ============================================================================
 
 use axum::{
@@ -9,29 +10,28 @@ use axum::{
     extract::Request,
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // Structure to match incoming AI chat payloads (Ollama / OpenAI format)
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct ChatMessage {
     role: String,
     content: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct ChatRequest {
     messages: Vec<ChatMessage>,
 }
 
-// 🔍 NEW: Struct to capture the assistant's response from Ollama
+// Struct to capture the assistant's response from Ollama
 #[derive(Deserialize, Debug)]
 struct ChatResponse {
     message: ChatMessage,
 }
 
-
 /// Main handler for all proxied traffic. It reads the incoming request,
-/// replicates its method, headers, and body, and sends it to Ollama.
+/// logs messages, truncates context for VRAM efficiency, and forwards to Ollama.
 pub async fn proxy_handler(req: Request) -> impl IntoResponse {
     let client = reqwest::Client::new();
     
@@ -47,24 +47,45 @@ pub async fn proxy_handler(req: Request) -> impl IntoResponse {
         Ok(bytes) => bytes,
         Err(_) => return Response::builder().status(500).body(Body::from("Failed to read request body")).unwrap(),
     };
+
+    let mut modified_body_bytes = body_bytes.clone();
     
-    // 🔍 NEW: Try to parse the request body as a chat completion JSON and log it!
-    // We do this inside a block so any parsing errors don't crash the proxy pass-through.
-    if let Ok(chat_req) = serde_json::from_slice::<ChatRequest>(&body_bytes) {
+    // 🔍 Single-pass parsing, logging, and VRAM budgeting
+    if let Ok(mut chat_req) = serde_json::from_slice::<ChatRequest>(&body_bytes) {
+        // Log all incoming messages to SQLite (full history preserved!)
         if let Ok(conn) = crate::db::init_db() {
-            for msg in chat_req.messages {
+            for msg in &chat_req.messages {
                 println!("💾 Logging message to DB [{}]: {}", msg.role, msg.content);
                 let _ = crate::db::insert_message(&conn, &msg.role, &msg.content);
             }
         }
+
+        // ✂️ BUDGETING / TRUNCATION LOGIC
+        // Keep only the last 6 messages to prevent context bloat and lower VRAM usage
+        let max_messages = 6;
+        if chat_req.messages.len() > max_messages {
+            println!(
+                "✂️ Truncating context from {} to last {} messages to save VRAM",
+                chat_req.messages.len(),
+                max_messages
+            );
+            
+            let split_index = chat_req.messages.len() - max_messages;
+            chat_req.messages = chat_req.messages.split_off(split_index);
+
+            // Re-serialize the modified request back into JSON bytes for Ollama
+            if let Ok(new_bytes) = serde_json::to_vec(&chat_req) {
+                modified_body_bytes = axum::body::Bytes::from(new_bytes);
+            }
+        }
     }
 
-    // Build the outgoing request to Ollama
+    // Build the outgoing request to Ollama using `modified_body_bytes`
     let mut forward_req = client.request(method, &backend_url);
     for (key, value) in headers.iter() {
         forward_req = forward_req.header(key, value);
     }
-    forward_req = forward_req.body(body_bytes);
+    forward_req = forward_req.body(modified_body_bytes);
 
     // Send the request and handle the backend's response
     match forward_req.send().await {
@@ -77,7 +98,7 @@ pub async fn proxy_handler(req: Request) -> impl IntoResponse {
                 Err(_) => return Response::builder().status(500).body(Body::from("Failed to read backend response")).unwrap(),
             };
 
-            // 🔍 NEW: 2. Log incoming ASSISTANT response to DB!
+            // 🔍 Log incoming ASSISTANT response to DB!
             if let Ok(chat_resp) = serde_json::from_slice::<ChatResponse>(&resp_bytes) {
                 if let Ok(conn) = crate::db::init_db() {
                     println!("💾 Logging model response to DB: {}", chat_resp.message.content);
