@@ -60,18 +60,35 @@ pub async fn proxy_handler(req: Request) -> impl IntoResponse {
             }
         }
 
-        // ✂️ BUDGETING / TRUNCATION LOGIC
-        // Keep only the last 6 messages to prevent context bloat and lower VRAM usage
-        let max_messages = 6;
-        if chat_req.messages.len() > max_messages {
-            println!(
-                "✂️ Truncating context from {} to last {} messages to save VRAM",
-                chat_req.messages.len(),
-                max_messages
-            );
+        // ✂️ BUDGETING / TRUNCATION LOGIC WITH SYSTEM PROMPT PRESERVATION
+        let max_total_messages = 6;
+        if chat_req.messages.len() > max_total_messages {
+            // Check if the very first message is a system prompt
+            let has_system = chat_req.messages.first().map_or(false, |m| m.role == "system");
             
-            let split_index = chat_req.messages.len() - max_messages;
-            chat_req.messages = chat_req.messages.split_off(split_index);
+            if has_system {
+                println!("🛡️ System prompt detected! Preserving it in the context window.");
+                let system_msg = chat_req.messages.remove(0); // Safely take out the system prompt
+                
+                // Allow the remaining history to fit the rest of the budget
+                let max_history = max_total_messages - 1;
+                if chat_req.messages.len() > max_history {
+                    let split_index = chat_req.messages.len() - max_history;
+                    chat_req.messages = chat_req.messages.split_off(split_index);
+                }
+                
+                // Put the system prompt back securely at index 0
+                chat_req.messages.insert(0, system_msg);
+            } else {
+                // Standard truncation if no system prompt exists
+                println!(
+                    "✂️ Truncating context from {} to last {} messages to save VRAM",
+                    chat_req.messages.len(),
+                    max_total_messages
+                );
+                let split_index = chat_req.messages.len() - max_total_messages;
+                chat_req.messages = chat_req.messages.split_off(split_index);
+            }
 
             // Re-serialize the modified request back into JSON bytes for Ollama
             if let Ok(new_bytes) = serde_json::to_vec(&chat_req) {
