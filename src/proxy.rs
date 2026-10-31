@@ -4,7 +4,6 @@
 // applies prompt truncation/token budgeting, forwards requests to Ollama,
 // and captures assistant responses.
 // ============================================================================
-
 use axum::{
     body::Body,
     extract::Request,
@@ -60,8 +59,11 @@ pub async fn proxy_handler(req: Request) -> impl IntoResponse {
             }
         }
 
-        // ✂️ BUDGETING / TRUNCATION LOGIC WITH SYSTEM PROMPT PRESERVATION
-        let max_total_messages = 6;
+        // ✂️ BUDGETING / TRUNCATION LOGIC WITH CONFIGURABLE EVN LIMIT
+        let max_total_messages: usize = std::env::var("MAX_CONTEXT_MESSAGES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6);
         if chat_req.messages.len() > max_total_messages {
             // Check if the very first message is a system prompt
             let has_system = chat_req.messages.first().map_or(false, |m| m.role == "system");
